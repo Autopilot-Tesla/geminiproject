@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gemini 3.0 Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Babel for in-browser compilation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+        background-color: #131314;
+        color: #e2e8f0;
+        overflow: hidden;
+      }
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: #444746; border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #5E5E5E; }
+      .animate-pulse-once { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) 1; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+    </style>
+
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.2.0",
+    "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.294.0",
+    "@google/genai": "https://esm.sh/@google/genai@0.0.12",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/",
+    "uuid": "https://esm.sh/uuid@^13.0.0",
+    "react-markdown": "https://esm.sh/react-markdown@^10.1.0",
+    "remark-gfm": "https://esm.sh/remark-gfm@^4.0.1"
+  }
+}
+</script>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- Error Handler to show crashes on screen -->
+    <script>
+      window.onerror = function(message, source, lineno, colno, error) {
+        document.body.innerHTML += '<div style="color:#ff6b6b; background:#2d2d2d; padding:20px; font-family:monospace; margin:20px; border-radius:8px;"><strong>App Crash:</strong> ' + message + '</div>';
+      };
+    </script>
+
+    <!-- 
+      API KEY CONFIG
+      Paste your key below.
+    -->
+    <script>
+      window.process = {
+        env: {
+          API_KEY: '' // PASTE KEY HERE e.g. 'AIzaSy...'
+        }
+      };
+    </script>
+
+    <script type="text/babel" data-type="module" data-presets="react,typescript">
+        import React, { useState, useEffect, useRef } from 'react';
+        import ReactDOM from 'react-dom/client';
+        import { 
+            Plus, MessageSquare, Menu, Settings, Trash2, 
+            Send, X, Brain, Globe, Sliders, 
+            Bot, User, AlertCircle, FileText, ExternalLink, Copy, Check,
+            Moon, Sun, Monitor
+        } from 'lucide-react';
+        import { GoogleGenAI } from "@google/genai";
+
+        // --- CONSTANTS ---
+        const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
+        const SUPPORTED_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif'];
+
+        const AVAILABLE_MODELS = [
+            { id: 'gemini-3-flash-preview', name: 'Gemini 3.0 Flash', description: 'Fast and versatile', hasThinking: false },
+            { id: 'gemini-3-pro-preview', name: 'Gemini 3.0 Pro', description: 'Advanced reasoning', hasThinking: true },
+        ];
+
+        const DEFAULT_SETTINGS = {
+            model: 'gemini-3-flash-preview',
+            enableSearch: false,
+            enableThinking: false,
+            thinkingBudget: 1024,
+        };
+
+        // --- SERVICES ---
+        const API_KEY = process.env.API_KEY || '';
+
+        class GeminiService {
+            constructor() {
+                this.ai = null;
+                if (API_KEY) {
+                    this.ai = new GoogleGenAI({ apiKey: API_KEY });
+                }
+            }
+
+            async *streamResponse(history, newMessage, attachments, settings) {
+                if (!this.ai) {
+                    if (window.process.env.API_KEY) {
+                         this.ai = new GoogleGenAI({ apiKey: window.process.env.API_KEY });
+                    } else {
+                         throw new Error("API Key is missing. Please edit index.html to add it.");
+                    }
+                }
+
+                const contents = history.filter(m => !m.isError).map(m => {
+                    const parts = [];
+                    if (m.attachments && m.attachments.length > 0) {
+                        m.attachments.forEach(att => {
+                            parts.push({
+                                inlineData: { mimeType: att.mimeType, data: att.data }
+                            });
+                        });
+                    }
+                    if (m.text) parts.push({ text: m.text });
+                    return { role: m.role, parts: parts };
+                });
+
+                const newParts = [];
+                if (attachments.length > 0) {
+                    attachments.forEach(att => {
+                        newParts.push({
+                            inlineData: { mimeType: att.mimeType, data: att.data }
+                        });
+                    });
+                }
+                newParts.push({ text: newMessage });
+                
+                contents.push({ role: 'user', parts: newParts });
+
+                const tools = [];
+                if (settings.enableSearch) tools.push({ googleSearch: {} });
+
+                const config = {
+                    tools: tools.length > 0 ? tools : undefined,
+                };
+
+                if (settings.enableThinking && settings.model.includes('pro')) {
+                    config.thinkingConfig = { thinkingBudget: settings.thinkingBudget };
+                }
+
+                try {
+                    const result = await this.ai.models.generateContentStream({
+                        model: settings.model,
+                        contents: contents,
+                        config: config
+                    });
+
+                    for await (const chunk of result) {
+                        const text = chunk.text || '';
+                        const groundingChunks = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks;
+                        yield { text, groundingChunks };
+                    }
+                } catch (error) {
+                    console.error("Gemini API Error Detail:", error);
+                    let message = "An error occurred while communicating with Gemini.";
+                    if (error.message?.includes('400')) message = "Bad Request. Check if image format is supported or prompt is valid.";
+                    else if (error.message?.includes('401') || error.message?.includes('403')) message = "Unauthorized. Invalid API Key.";
+                    else if (error.message?.includes('429')) message = "Too Many Requests.";
+                    else if (error.message) message = error.message;
+                    throw new Error(message);
+                }
+            }
+        }
+        const geminiService = new GeminiService();
+
+        // --- COMPONENTS ---
+
+        const MessageBubble = ({ message }) => {
+            const isUser = message.role === 'user';
+            const isError = message.isError;
+            const [copied, setCopied] = useState(false);
+
+            const handleCopy = () => {
+                navigator.clipboard.writeText(message.text);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+            };
+
+            // Formatting simple markdown-like features (bold, code blocks) without external lib
+            const formatText = (text) => {
+                if (!text) return null;
+                // Simple split by code blocks
+                const parts = text.split(/(```[\s\S]*?```)/g);
+                return parts.map((part, index) => {
+                    if (part.startsWith('```')) {
+                        const codeContent = part.replace(/^```\w*\n?/, '').replace(/```$/, '');
+                        return (
+                            <div key={index} className="rounded-lg overflow-hidden bg-[#1E1F20] border border-[#444746] my-4 font-mono text-sm">
+                                <div className="px-4 py-2 bg-[#2D2E30] text-[#E3E3E3] text-xs opacity-70">Code</div>
+                                <div className="p-4 overflow-x-auto text-[#E3E3E3] whitespace-pre">{codeContent}</div>
+                            </div>
+                        );
+                    }
+                    return <span key={index} className="whitespace-pre-wrap">{part}</span>;
+                });
+            };
+
+            return (
+                <div className={`flex w-full gap-4 mb-2 ${isUser ? 'flex-row-reverse' : ''}`}>
+                    <div className={`flex-shrink-0 mt-1 ${isUser ? 'ml-2' : 'mr-2'}`}>
+                        {isUser ? (
+                            <div className="w-8 h-8 rounded-full bg-[#2D2E30] flex items-center justify-center text-[#E3E3E3]">
+                                <User size={18} />
+                            </div>
+                        ) : (
+                            <div className="w-8 h-8 rounded-full flex items-center justify-center text-[#444746] overflow-hidden">
+                                {isError ? <AlertCircle size={24} className="text-red-400" /> : (
+                                <img src="https://www.gstatic.com/lamda/images/gemini_sparkle_v002_d4735304ff6292a690345.svg" alt="Gemini" className="w-8 h-8 animate-pulse-once" />
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className={`flex flex-col max-w-[85%] lg:max-w-[75%] gap-2 ${isUser ? 'items-end' : 'items-start'}`}>
+                        {message.attachments && message.attachments.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-1">
+                            {message.attachments.map((att, idx) => (
+                            <div key={idx} className="relative group overflow-hidden rounded-xl border border-[#444746] bg-[#1E1F20]">
+                                {att.mimeType.startsWith('image/') ? (
+                                <img src={`data:${att.mimeType};base64,${att.data}`} alt="attachment" className="h-48 w-auto object-cover" />
+                                ) : (
+                                <div className="h-20 w-32 flex flex-col items-center justify-center p-2 gap-1 text-[#E3E3E3]">
+                                    <FileText size={24} />
+                                    <span className="text-xs truncate max-w-full">{att.name || 'File'}</span>
+                                </div>
+                                )}
+                            </div>
+                            ))}
+                        </div>
+                        )}
+
+                        <div className={`relative text-[15px] leading-7 tracking-wide ${isUser ? 'bg-[#2D2E30] text-[#E3E3E3] px-5 py-3 rounded-[20px] rounded-tr-[4px]' : isError ? 'bg-red-900/10 border border-red-800/50 text-red-200 px-4 py-3 rounded-lg' : 'text-[#E3E3E3] pl-0 pt-1'}`}>
+                            {isUser ? (
+                                <div className="whitespace-pre-wrap font-medium">{message.text}</div>
+                            ) : (
+                                <div className="w-full overflow-hidden">
+                                    {formatText(message.text)}
+
+                                    {!isError && (
+                                        <div className="flex items-center gap-2 mt-2">
+                                            <button onClick={handleCopy} className="p-1.5 text-[#8E9196] hover:bg-[#2D2E30] rounded-full transition-colors" title="Copy response">
+                                                {copied ? <Check size={16} /> : <Copy size={16} />}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {message.groundingSources && message.groundingSources.length > 0 && (
+                                    <div className="mt-4 pt-3 border-t border-[#2D2E30]">
+                                        <p className="text-xs font-semibold text-[#8E9196] mb-2 flex items-center gap-1"><ExternalLink size={12} /> Sources</p>
+                                        <div className="flex flex-wrap gap-2">
+                                        {message.groundingSources.map((chunk, i) => (
+                                            chunk.web?.uri && (
+                                            <a key={i} href={chunk.web.uri} target="_blank" rel="noopener noreferrer" className="text-xs bg-[#1E1F20] border border-[#444746] hover:bg-[#2D2E30] px-3 py-1.5 rounded-full text-[#A8C7FA] truncate max-w-[200px] transition-colors">
+                                                {chunk.web.title || new URL(chunk.web.uri).hostname}
+                                            </a>
+                                            )
+                                        ))}
+                                        </div>
+                                    </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const InputArea = ({ onSend, isLoading, settings, onUpdateSettings }) => {
+            const [text, setText] = useState('');
+            const [attachments, setAttachments] = useState([]);
+            const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+            const textareaRef = useRef(null);
+            const fileInputRef = useRef(null);
+
+            useEffect(() => {
+                if (textareaRef.current) {
+                    textareaRef.current.style.height = 'auto';
+                    textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+                }
+            }, [text]);
+
+            useEffect(() => {
+                const handlePaste = (e) => {
+                    const items = e.clipboardData?.items;
+                    if (!items) return;
+                    for (let i = 0; i < items.length; i++) {
+                        if (items[i].type.indexOf('image') !== -1) {
+                            e.preventDefault();
+                            const blob = items[i].getAsFile();
+                            if (blob) processFile(blob);
+                        }
+                    }
+                };
+                const currentTextarea = textareaRef.current;
+                if (currentTextarea) currentTextarea.addEventListener('paste', handlePaste);
+                return () => currentTextarea?.removeEventListener('paste', handlePaste);
+            }, []);
+
+            const processFile = (file) => {
+                if (file.size > MAX_FILE_SIZE_BYTES) return alert(`File ${file.name} is too large. Max 10MB.`);
+                if (!SUPPORTED_IMAGE_TYPES.includes(file.type)) return alert(`File ${file.name} is not a supported image.`);
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const base64Data = e.target.result.split(',')[1];
+                    setAttachments(prev => [...prev, { mimeType: file.type, data: base64Data, name: file.name }]);
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const handleFileSelect = (e) => {
+                if (e.target.files) {
+                    for (let i = 0; i < e.target.files.length; i++) processFile(e.target.files[i]);
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                }
+            };
+
+            const handleSend = () => {
+                if ((!text.trim() && attachments.length === 0) || isLoading) return;
+                onSend(text, attachments);
+                setText('');
+                setAttachments([]);
+                if (textareaRef.current) textareaRef.current.style.height = 'auto';
+            };
+
+            const selectedModel = AVAILABLE_MODELS.find(m => m.id === settings.model);
+
+            return (
+                <div className="w-full max-w-[800px] mx-auto p-4 relative z-10">
+                    <div className="bg-[#1E1F20] rounded-[28px] shadow-lg border border-[#444746]/50 focus-within:bg-[#282A2C] focus-within:border-[#5E5E5E] transition-all">
+                        {attachments.length > 0 && (
+                        <div className="px-4 pt-3 flex gap-3 overflow-x-auto scrollbar-none">
+                            {attachments.map((att, i) => (
+                            <div key={i} className="relative group shrink-0">
+                                <img src={`data:${att.mimeType};base64,${att.data}`} className="h-14 w-14 object-cover rounded-lg border border-[#444746]" alt="preview" />
+                                <button onClick={() => setAttachments(prev => prev.filter((_, idx) => idx !== i))} className="absolute -top-1.5 -right-1.5 bg-[#3c4043] text-[#E3E3E3] rounded-full p-0.5 border border-[#131314] shadow-md hover:bg-[#5f6368]"><X size={12} /></button>
+                            </div>
+                            ))}
+                        </div>
+                        )}
+
+                        <div className="flex items-end gap-2 p-2">
+                            <button onClick={() => fileInputRef.current?.click()} className="p-3 text-[#E3E3E3] hover:bg-[#3C4043]/50 rounded-full transition-colors shrink-0" title="Add image"><Plus size={20} /></button>
+                            <input type="file" multiple accept="image/*" ref={fileInputRef} className="hidden" onChange={handleFileSelect} />
+                            <textarea ref={textareaRef} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }} placeholder={settings.enableThinking ? "Ask anything..." : "Message Gemini..."} rows={1} className="flex-1 bg-transparent text-[#E3E3E3] placeholder-[#8E9196] py-3.5 resize-none focus:outline-none max-h-[200px]" style={{minHeight: '24px'}} />
+                            {(text.trim() || attachments.length > 0) && (
+                                <button onClick={handleSend} disabled={isLoading} className="p-2.5 bg-[#E3E3E3] text-[#131314] rounded-full hover:bg-white transition-all shadow-md shrink-0 mb-1">
+                                    {isLoading ? <div className="w-5 h-5 border-2 border-[#131314]/30 border-t-[#131314] rounded-full animate-spin"></div> : <Send size={18} fill="currentColor" />}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    
+                    <div className="flex items-center justify-between mt-2 px-2">
+                        <div className="flex items-center gap-2">
+                            <div className="relative">
+                                <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} className="flex items-center gap-1.5 text-xs font-medium text-[#8E9196] hover:text-[#E3E3E3] bg-[#1E1F20] px-3 py-1.5 rounded-lg border border-[#444746]/30 hover:bg-[#2D2E30] transition-colors">
+                                    <span className="truncate max-w-[100px]">{selectedModel?.name}</span><Sliders size={12} />
+                                </button>
+                                {isSettingsOpen && (
+                                <div className="absolute bottom-full left-0 mb-2 w-64 bg-[#1E1F20] border border-[#2D2E30] rounded-xl shadow-xl p-3 z-50">
+                                    <h3 className="text-xs font-semibold text-[#8E9196] uppercase mb-2">Model Selection</h3>
+                                    <div className="space-y-1">
+                                        {AVAILABLE_MODELS.map(model => (
+                                            <button key={model.id} onClick={() => { onUpdateSettings({...settings, model: model.id}); setIsSettingsOpen(false); }} className={`w-full text-left px-3 py-2 rounded-lg text-sm flex flex-col ${settings.model === model.id ? 'bg-[#004A77]/50 text-[#A8C7FA]' : 'text-[#E3E3E3] hover:bg-[#2D2E30]'}`}>
+                                                <span className="font-medium">{model.name}</span>
+                                                {model.hasThinking && <span className="text-[10px] bg-purple-900/40 text-purple-300 w-fit px-1.5 rounded mt-0.5">Thinking</span>}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    {settings.model.includes('pro') && (
+                                    <div className="mt-3 pt-3 border-t border-[#2D2E30]">
+                                        <div className="flex justify-between items-center mb-2"><span className="text-xs text-[#E3E3E3]">Thinking Budget</span><span className="text-xs text-[#A8C7FA] font-mono">{settings.thinkingBudget}</span></div>
+                                        <input type="range" min="0" max="32000" step="1024" value={settings.thinkingBudget} onChange={(e) => onUpdateSettings({...settings, thinkingBudget: parseInt(e.target.value)})} className="w-full h-1 bg-[#444746] rounded-lg appearance-none cursor-pointer accent-[#A8C7FA]" />
+                                    </div>
+                                    )}
+                                </div>
+                                )}
+                            </div>
+                            {settings.model.includes('pro') && (
+                            <button onClick={() => onUpdateSettings({...settings, enableThinking: !settings.enableThinking})} className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-colors border ${settings.enableThinking ? 'bg-purple-900/20 text-purple-300 border-purple-500/30' : 'bg-[#1E1F20] text-[#8E9196] border-[#444746]/30 hover:text-[#E3E3E3]'}`}><Brain size={12} /><span>Thinking</span></button>
+                            )}
+                            <button onClick={() => onUpdateSettings({...settings, enableSearch: !settings.enableSearch})} className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-colors border ${settings.enableSearch ? 'bg-[#004A77]/20 text-[#A8C7FA] border-[#A8C7FA]/30' : 'bg-[#1E1F20] text-[#8E9196] border-[#444746]/30 hover:text-[#E3E3E3]'}`}><Globe size={12} /><span>Search</span></button>
+                        </div>
+                        <div className="text-[10px] text-[#444746]">{text.length} / 50000</div>
+                    </div>
+                </div>
+            );
+        };
+
+        const Sidebar = ({ isOpen, toggleSidebar, sessions, currentSessionId, onSelectSession, onCreateSession, onDeleteSession, onOpenSettings }) => (
+            <>
+                <div className={`fixed inset-0 bg-black/50 z-20 md:hidden transition-opacity duration-300 ${isOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={toggleSidebar} />
+                <aside className={`fixed md:relative z-30 h-full w-[260px] bg-[#1E1F20] flex flex-col transition-transform duration-300 border-r border-[#2D2E30] md:border-none ${isOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:w-0 md:overflow-hidden'}`}>
+                    <div className="p-4 flex items-center justify-between"><button onClick={toggleSidebar} className="text-[#E3E3E3] hover:bg-[#2D2E30] p-2 rounded-full md:hidden"><Menu size={20} /></button></div>
+                    <div className="px-4 pb-4"><button onClick={onCreateSession} className="flex items-center gap-3 px-4 py-3 bg-[#1A1A1C] hover:bg-[#2D2E30] text-[#E3E3E3] rounded-full transition-colors text-sm font-medium w-fit min-w-[140px]"><Plus size={18} className="text-[#8E9196]" /><span>New chat</span></button></div>
+                    <div className="px-4 pb-2"><span className="text-xs font-medium text-[#8E9196]">Recent</span></div>
+                    <div className="flex-1 overflow-y-auto px-2 space-y-1 scrollbar-thin scrollbar-thumb-[#2D2E30] scrollbar-track-transparent">
+                        {sessions.map((session) => (
+                            <div key={session.id} className={`group flex items-center gap-3 px-3 py-2 rounded-full cursor-pointer transition-colors relative text-sm ${currentSessionId === session.id ? 'bg-[#004A77]/30 text-[#E3E3E3]' : 'text-[#E3E3E3] hover:bg-[#2D2E30]'}`} onClick={() => onSelectSession(session.id)}>
+                                <MessageSquare size={14} className="text-[#E3E3E3]" /><div className="flex-1 truncate">{session.title}</div>
+                                <button onClick={(e) => { e.stopPropagation(); onDeleteSession(session.id); }} className="opacity-0 group-hover:opacity-100 p-1.5 hover:text-red-400 hover:bg-[#3D3E40] rounded-full transition-all"><Trash2 size={12} /></button>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="p-2 mt-auto">
+                        <button onClick={onOpenSettings} className="w-full flex items-center gap-3 px-3 py-3 rounded-full hover:bg-[#2D2E30] text-[#E3E3E3] transition-colors text-sm"><Settings size={18} className="text-[#8E9196]" /><span>Settings</span></button>
+                        <div className="px-4 py-2 flex items-center gap-2 text-[10px] text-[#8E9196]"><div className="w-1.5 h-1.5 rounded-full bg-green-500"></div><span>Gemini 3.0 Pro</span></div>
+                    </div>
+                </aside>
+            </>
+        );
+
+        const SettingsModal = ({ isOpen, onClose, onClearHistory }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+                    <div className="bg-[#1E1F20] w-full max-w-md rounded-2xl border border-[#2D2E30] shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-200">
+                        <div className="flex items-center justify-between p-4 border-b border-[#2D2E30]"><h2 className="text-lg font-medium text-[#E3E3E3]">Settings</h2><button onClick={onClose} className="p-2 hover:bg-[#2D2E30] rounded-full text-[#E3E3E3] transition-colors"><X size={20} /></button></div>
+                        <div className="p-4 space-y-6">
+                            <div><h3 className="text-xs font-semibold text-[#8E9196] uppercase mb-3">General</h3><button onClick={() => { if (window.confirm("Are you sure?")) { onClearHistory(); onClose(); } }} className="w-full flex items-center justify-between p-3 rounded-xl hover:bg-[#2D2E30] text-[#E3E3E3] transition-colors group"><div className="flex items-center gap-3"><Trash2 size={18} className="text-[#8E9196] group-hover:text-red-400" /><span>Clear all chat history</span></div></button></div>
+                            <div>
+                                <h3 className="text-xs font-semibold text-[#8E9196] uppercase mb-3">Appearance</h3>
+                                <div className="grid grid-cols-3 gap-2 p-1 bg-[#2D2E30] rounded-xl">
+                                    <button className="flex flex-col items-center justify-center py-2 px-4 rounded-lg bg-[#1E1F20] text-[#E3E3E3] shadow-sm"><Moon size={16} className="mb-1" /><span className="text-xs">Dark</span></button>
+                                    <button className="flex flex-col items-center justify-center py-2 px-4 rounded-lg text-[#8E9196] opacity-50 cursor-not-allowed"><Sun size={16} className="mb-1" /><span className="text-xs">Light</span></button>
+                                    <button className="flex flex-col items-center justify-center py-2 px-4 rounded-lg text-[#8E9196] opacity-50 cursor-not-allowed"><Monitor size={16} className="mb-1" /><span className="text-xs">System</span></button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const ChatArea = ({ session, settings, onUpdateSettings, onUpdateMessages, isSidebarOpen, toggleSidebar, onCreateSession }) => {
+            const [isLoading, setIsLoading] = useState(false);
+            const messagesEndRef = useRef(null);
+            const containerRef = useRef(null);
+
+            const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            useEffect(() => scrollToBottom(), [session?.messages]);
+
+            const handleSendMessage = async (text, attachments) => {
+                if (!session) return;
+                const newMessage = { id: crypto.randomUUID(), role: 'user', text: text, timestamp: Date.now(), attachments: attachments };
+                const currentMessages = [...session.messages, newMessage];
+                onUpdateMessages(currentMessages);
+                setIsLoading(true);
+                try {
+                    const botMessageId = crypto.randomUUID();
+                    let updatedMessages = [...currentMessages, { id: botMessageId, role: 'model', text: '', timestamp: Date.now() }];
+                    onUpdateMessages(updatedMessages);
+                    const stream = geminiService.streamResponse(currentMessages.slice(0, -1), text, attachments, settings);
+                    let fullText = '';
+                    let allGroundingChunks = [];
+                    for await (const chunk of stream) {
+                        fullText += chunk.text;
+                        if (chunk.groundingChunks) allGroundingChunks = [...allGroundingChunks, ...chunk.groundingChunks];
+                        updatedMessages = updatedMessages.map(m => m.id === botMessageId ? { ...m, text: fullText, groundingSources: allGroundingChunks.length > 0 ? allGroundingChunks : undefined } : m);
+                        onUpdateMessages(updatedMessages);
+                        if (containerRef.current && (containerRef.current.scrollHeight - containerRef.current.scrollTop - containerRef.current.clientHeight < 500)) scrollToBottom();
+                    }
+                } catch (error) {
+                    const errorMessage = { id: crypto.randomUUID(), role: 'model', text: `**Error**: ${error.message}`, timestamp: Date.now(), isError: true };
+                    onUpdateMessages([...currentMessages, errorMessage]);
+                } finally {
+                    setIsLoading(false);
+                    scrollToBottom();
+                }
+            };
+
+            if (!session) return <div className="h-full flex flex-col items-center justify-center p-4 bg-[#131314]"><div className="w-12 h-12 border-4 border-[#2D2E30] border-t-[#A8C7FA] rounded-full animate-spin"></div></div>;
+
+            return (
+                <div className="flex flex-col h-full w-full bg-[#131314]">
+                    {!isSidebarOpen && <div className="md:hidden flex items-center p-4 text-[#E3E3E3]"><button onClick={toggleSidebar} className="p-2 -ml-2 hover:bg-[#2D2E30] rounded-full"><Menu size={24} /></button><span className="ml-2 font-medium">Gemini</span></div>}
+                    <div ref={containerRef} className="flex-1 overflow-y-auto px-4 md:px-0 pt-6 space-y-8 scroll-smooth">
+                        <div className="w-full max-w-[800px] mx-auto pb-4">
+                            {session.messages.length === 0 ? (
+                                <div className="flex flex-col items-start justify-center min-h-[50vh] px-4">
+                                    <h1 className="text-5xl md:text-6xl font-medium bg-gradient-to-r from-[#4285F4] via-[#9B72CB] to-[#D96570] text-transparent bg-clip-text mb-2 tracking-tight">Hello, human</h1>
+                                    <p className="text-2xl text-[#444746] font-medium mb-8">How can I help you today?</p>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
+                                        <button onClick={() => handleSendMessage("Explain quantum computing in simple terms", [])} className="text-left p-4 bg-[#1E1F20] hover:bg-[#2D2E30] rounded-xl border border-transparent hover:border-[#444746] transition-all"><span className="text-[#E3E3E3] text-sm">Explain quantum computing</span></button>
+                                        <button onClick={() => handleSendMessage("Write a Python script to scrape a website", [])} className="text-left p-4 bg-[#1E1F20] hover:bg-[#2D2E30] rounded-xl border border-transparent hover:border-[#444746] transition-all"><span className="text-[#E3E3E3] text-sm">Write a Python script</span></button>
+                                    </div>
+                                    {!window.process.env.API_KEY && (
+                                        <div className="mt-8 p-4 bg-red-900/10 border border-red-900/30 rounded-lg max-w-lg w-full">
+                                            <p className="text-red-400 text-sm font-semibold">API Key Missing</p>
+                                            <p className="text-red-200/70 text-xs mt-1">Please edit index.html and add your API_KEY in the window.process section.</p>
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                session.messages.map(message => <MessageBubble key={message.id} message={message} />)
+                            )}
+                            <div ref={messagesEndRef} />
+                        </div>
+                    </div>
+                    <div className="shrink-0 pb-6 pt-2 bg-[#131314]">
+                        <InputArea onSend={handleSendMessage} isLoading={isLoading} settings={settings} onUpdateSettings={onUpdateSettings} />
+                        <p className="text-center text-[10px] text-[#444746] mt-4">Gemini can make mistakes, so double-check it.</p>
+                    </div>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [sessions, setSessions] = useState([]);
+            const [currentSessionId, setCurrentSessionId] = useState(null);
+            const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+            const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+            const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+
+            useEffect(() => {
+                const saved = localStorage.getItem('gemini_chat_sessions');
+                if (saved) {
+                    try {
+                        const parsed = JSON.parse(saved);
+                        setSessions(parsed);
+                        if (parsed.length > 0) setCurrentSessionId(parsed[0].id);
+                    } catch (e) { console.error(e); }
+                } else {
+                    createNewSession();
+                }
+            }, []);
+
+            useEffect(() => {
+                if (sessions.length > 0) localStorage.setItem('gemini_chat_sessions', JSON.stringify(sessions));
+                else localStorage.removeItem('gemini_chat_sessions');
+            }, [sessions]);
+
+            const createNewSession = () => {
+                const newSession = { id: crypto.randomUUID(), title: 'New Chat', messages: [], createdAt: Date.now(), updatedAt: Date.now() };
+                setSessions(prev => [newSession, ...prev]);
+                setCurrentSessionId(newSession.id);
+                if (window.innerWidth < 768) setIsSidebarOpen(false);
+            };
+
+            const deleteSession = (id) => {
+                setSessions(prev => prev.filter(s => s.id !== id));
+                if (currentSessionId === id) {
+                    const remaining = sessions.filter(s => s.id !== id);
+                    if (remaining.length > 0) setCurrentSessionId(remaining[0].id);
+                    else createNewSession();
+                }
+            };
+
+            const updateCurrentSessionMessages = (messages) => {
+                if (!currentSessionId) return;
+                setSessions(prev => prev.map(session => {
+                    if (session.id === currentSessionId) {
+                        let newTitle = session.title;
+                        if (session.messages.length === 0 && messages.length > 0) {
+                            const firstUserMsg = messages.find(m => m.role === 'user');
+                            if (firstUserMsg && session.title === 'New Chat') newTitle = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
+                        }
+                        return { ...session, messages, title: newTitle, updatedAt: Date.now() };
+                    }
+                    return session;
+                }));
+            };
+
+            const currentSession = sessions.find(s => s.id === currentSessionId) || null;
+
+            return (
+                <div className="flex h-screen overflow-hidden bg-[#131314] text-[#E3E3E3] font-sans">
+                    <Sidebar isOpen={isSidebarOpen} toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} sessions={sessions} currentSessionId={currentSessionId} onSelectSession={setCurrentSessionId} onCreateSession={createNewSession} onDeleteSession={deleteSession} onOpenSettings={() => setIsSettingsOpen(true)} />
+                    <main className="flex-1 flex flex-col h-full relative w-full transition-all duration-300 bg-[#131314]">
+                        <ChatArea session={currentSession} settings={settings} onUpdateSettings={setSettings} onUpdateMessages={updateCurrentSessionMessages} isSidebarOpen={isSidebarOpen} toggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)} onCreateSession={createNewSession} />
+                    </main>
+                    <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} onClearHistory={() => { setSessions([]); localStorage.removeItem('gemini_chat_sessions'); createNewSession(); }} />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
